@@ -83,10 +83,20 @@ func (bc *BuildClient) startExecution(executionRequest *remoteworker.DesiredStat
 	bc.stopExecution()
 
 	// Spawn the execution of the build action.
+	//
+	// The per-action context is built fresh from context.Background()
+	// (so it is independent of the long-lived Synchronize() call) and
+	// reconstitutes per-action state from executionRequest:
+	//   - W3C trace context, for tracing continuity
+	//   - AuthenticationMetadata, for outbound gRPC interceptors to
+	//     propagate caller-scoped credentials/identity downstream (e.g.
+	//     via add_metadata_jmespath_expression on the runner client)
 	var ctx context.Context
 	ctx, bc.executionCancellation = context.WithCancel(
 		otel.NewContextWithW3CTraceContext(
-			context.Background(),
+			ContextWithAuthenticationMetadataFromAuxiliary(
+				context.Background(),
+				executionRequest.AuxiliaryMetadata),
 			executionRequest.W3CTraceContext))
 	updates := make(chan *remoteworker.CurrentState_Executing, 10)
 	bc.executionUpdates = updates

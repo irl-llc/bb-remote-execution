@@ -446,11 +446,18 @@ func (bq *InMemoryBuildQueue) Execute(in *remoteexecution.ExecuteRequest, out re
 		return err
 	}
 
-	// Forward the client-provided authentication and request
-	// metadata, so that the worker logs it.
+	// Forward the client-provided authentication and request metadata
+	// to the worker. The full AuthenticationMetadata is shipped
+	// (including the private field) so that bb_worker can propagate it
+	// via gRPC interceptors on outbound calls (e.g., to the runner).
+	// bb_worker is responsible for stripping the private field from the
+	// auxiliary_metadata it echoes back in the ExecuteResponse, so
+	// downstream consumers (bb_browser, CAS) observe only the public
+	// portion — see NewDefaultExecuteResponse in pkg/builder.
 	auxiliaryMetadata := make([]*anypb.Any, 0, 2)
-	if authenticationMetadata, shouldDisplay := auth.AuthenticationMetadataFromContext(ctx).GetPublicProto(); shouldDisplay {
-		authenticationMetadataAny, err := anypb.New(authenticationMetadata)
+	fullAuth := auth.AuthenticationMetadataFromContext(ctx).GetFullProto()
+	if fullAuth.GetPublic() != nil || fullAuth.GetPrivate() != nil || len(fullAuth.GetTracingAttributes()) > 0 {
+		authenticationMetadataAny, err := anypb.New(fullAuth)
 		if err != nil {
 			return util.StatusWrapWithCode(err, codes.InvalidArgument, "Failed to marshal authentication metadata")
 		}

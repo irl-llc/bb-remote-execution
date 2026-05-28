@@ -7,6 +7,7 @@ import (
 	"github.com/buildbarn/bb-remote-execution/pkg/filesystem/access"
 	"github.com/buildbarn/bb-remote-execution/pkg/filesystem/pool"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/remoteworker"
+	auth_pb "github.com/buildbarn/bb-storage/pkg/proto/auth"
 	"github.com/buildbarn/bb-storage/pkg/digest"
 
 	"google.golang.org/grpc/codes"
@@ -14,13 +15,52 @@ import (
 	"google.golang.org/protobuf/types/known/anypb"
 )
 
+// redactPrivateAuthMetadata returns a copy of auxiliaryMetadata in which
+// every AuthenticationMetadata Any has its `private` field cleared.
+// `public` and `tracing_attributes` are preserved; non-auth Anys pass
+// through unchanged. The scheduler ships the full AuthenticationMetadata
+// (including `private`) to the worker for in-worker propagation (e.g.
+// via add_metadata_jmespath_expression on the outbound runner-client
+// interceptor), but the documented semantic of `private` is "not for
+// public display" — so the worker must redact it before echoing the
+// auxiliary_metadata back in the ExecuteResponse, where it would
+// otherwise reach CAS, action cache, bb_browser, and CompletedActionLogger.
+func redactPrivateAuthMetadata(auxiliaryMetadata []*anypb.Any) []*anypb.Any {
+	result := make([]*anypb.Any, 0, len(auxiliaryMetadata))
+	for _, am := range auxiliaryMetadata {
+		if !am.MessageIs(&auth_pb.AuthenticationMetadata{}) {
+			result = append(result, am)
+			continue
+		}
+		var authMD auth_pb.AuthenticationMetadata
+		if err := am.UnmarshalTo(&authMD); err != nil {
+			// Advertised as AuthenticationMetadata but unparseable —
+			// omit rather than risk passing through unredacted bytes.
+			continue
+		}
+		authMD.Private = nil
+		stripped, err := anypb.New(&authMD)
+		if err != nil {
+			// Re-marshal of a successfully unmarshalled message
+			// shouldn't fail in practice; omit on the off chance.
+			continue
+		}
+		result = append(result, stripped)
+	}
+	return result
+}
+
 // NewDefaultExecuteResponse creates an ExecuteResponse message that
 // contains all fields that BuildExecutor should set by default.
+//
+// The request's auxiliary_metadata is echoed into the response with the
+// `private` field of any AuthenticationMetadata Any redacted — see
+// redactPrivateAuthMetadata.
 func NewDefaultExecuteResponse(request *remoteworker.DesiredState_Executing) *remoteexecution.ExecuteResponse {
 	return &remoteexecution.ExecuteResponse{
 		Result: &remoteexecution.ActionResult{
 			ExecutionMetadata: &remoteexecution.ExecutedActionMetadata{
-				AuxiliaryMetadata: append([]*anypb.Any(nil), request.AuxiliaryMetadata...),
+				AuxiliaryMetadata: redactPrivateAuthMetadata(request.AuxiliaryMetadata),
 			},
 		},
 		ServerLogs: map[string]*remoteexecution.LogFile{},
