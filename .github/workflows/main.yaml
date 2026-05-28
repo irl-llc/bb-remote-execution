@@ -955,44 +955,6 @@
                "name": "Execute WinFSP Integration Tests",
                "run": "bazel test --test_output=errors //pkg/filesystem/virtual/winfsp:file_system_integration_test"
             },
-            {
-               "env": {
-                  "GITHUB_TOKEN": "${{ secrets.GITHUB_TOKEN }}"
-               },
-               "if": "matrix.host.upload",
-               "name": "Install Docker credentials",
-               "run": "echo \"${GITHUB_TOKEN}\" | docker login ghcr.io -u $ --password-stdin"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Clean Bazel cache from previous steps",
-               "run": "bazel clean"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Push container bb_noop_worker:bb_noop_worker",
-               "run": "bazel run --stamp //cmd/bb_noop_worker:bb_noop_worker_container_push"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Push container bb_runner:bb_runner_bare",
-               "run": "bazel run --stamp //cmd/bb_runner:bb_runner_bare_container_push"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Push container bb_runner_installer:bb_runner_installer",
-               "run": "bazel run --stamp //cmd/bb_runner_installer:bb_runner_installer_container_push"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Push container bb_scheduler:bb_scheduler",
-               "run": "bazel run --stamp //cmd/bb_scheduler:bb_scheduler_container_push"
-            },
-            {
-               "if": "matrix.host.upload",
-               "name": "Push container bb_worker:bb_worker",
-               "run": "bazel run --stamp //cmd/bb_worker:bb_worker_container_push"
-            }
          ],
          "strategy": {
             "matrix": {
@@ -1091,7 +1053,11 @@
       "push": {
          "branches": [
             "main"
+         ],
+         "tags": [
+            "*+irl*"
          ]
-      }
+      },
+      "workflow_dispatch": {}
    }
 }
