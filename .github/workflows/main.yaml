@@ -1010,6 +1010,9 @@
             "build_and_test"
          ],
          "runs-on": "ubuntu-latest",
+         "permissions": {
+            "contents": "write"
+         },
          "steps": [
             {
                "name": "Checkout the repository",
@@ -1028,21 +1031,12 @@
                "run": "shasum -a 256 assets/* > sha256"
             },
             {
-               "name": "Set release Git user",
-               "run": "git config --global user.email \"41898282+github-actions[bot]@users.noreply.github.com\"\ngit config --global user.name \"github-actions[bot]\"\n"
-            },
-            {
-               "id": "create_tag",
-               "name": "Generate tag",
-               "run": "BUILD_SCM_REVISION=$(git rev-parse --short HEAD)\nBUILD_SCM_TIMESTAMP=$(TZ=UTC date --date \"@$(git show -s --format=%ct HEAD)\" +%Y%m%dT%H%M%SZ)\nRELEASE_TAG=\"${BUILD_SCM_TIMESTAMP}-${BUILD_SCM_REVISION}\"\ngit tag $RELEASE_TAG\ngit push origin \"$RELEASE_TAG\"\necho \"release_tag=$RELEASE_TAG\" >> $GITHUB_OUTPUT\n"
-            },
-            {
                "name": "Create GitHub release and upload artifacts",
                "uses": "softprops/action-gh-release@v2",
                "with": {
                   "files": "assets/*\nsha256\n",
                   "make_latest": true,
-                  "tag_name": "${{ steps.create_tag.outputs.release_tag }}"
+                  "tag_name": "${{ github.ref_name }}"
                }
             }
          ]
