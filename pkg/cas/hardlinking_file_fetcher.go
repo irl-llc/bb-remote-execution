@@ -19,6 +19,7 @@ type hardlinkingFileFetcher struct {
 	cacheDirectory filesystem.Directory
 	maxFiles       int
 	maxSize        int64
+	useClonefile   bool
 
 	filesLock      sync.RWMutex
 	filesSize      map[string]int64
@@ -33,15 +34,22 @@ type hardlinkingFileFetcher struct {
 
 // NewHardlinkingFileFetcher is an adapter for FileFetcher that stores
 // files in an internal directory. After successfully downloading files
-// at the target location, they are hardlinked into the cache. Future
-// calls for the same file will hardlink them from the cache to the
-// target location. This reduces the amount of network traffic needed.
-func NewHardlinkingFileFetcher(base FileFetcher, cacheDirectory filesystem.Directory, maxFiles int, maxSize int64, evictionSet eviction.Set[string]) FileFetcher {
+// at the target location, they are linked into the cache. Future calls
+// for the same file link them from the cache to the target location.
+// This reduces the amount of network traffic needed.
+//
+// When useClonefile is set, files are staged with clonefile(2) (APFS
+// copy-on-write) instead of link(2). This is required on Darwin so that
+// self-resolving executables (e.g. hermetic Python interpreters) see
+// their input-root path rather than the shared cache-directory inode.
+// See UseClonefile in the worker configuration for details.
+func NewHardlinkingFileFetcher(base FileFetcher, cacheDirectory filesystem.Directory, maxFiles int, maxSize int64, useClonefile bool, evictionSet eviction.Set[string]) FileFetcher {
 	return &hardlinkingFileFetcher{
 		base:           base,
 		cacheDirectory: cacheDirectory,
 		maxFiles:       maxFiles,
 		maxSize:        maxSize,
+		useClonefile:   useClonefile,
 
 		filesSize: map[string]int64{},
 
@@ -49,6 +57,16 @@ func NewHardlinkingFileFetcher(base FileFetcher, cacheDirectory filesystem.Direc
 
 		downloads: map[string]<-chan struct{}{},
 	}
+}
+
+// installFile stages a file from one directory into another, either by
+// hardlinking (link(2)) or, when useClonefile is set, by APFS
+// copy-on-write cloning (clonefile(2)).
+func (ff *hardlinkingFileFetcher) installFile(fromDirectory filesystem.Directory, fromName path.Component, toDirectory filesystem.Directory, toName path.Component) error {
+	if ff.useClonefile {
+		return fromDirectory.Clonefile(fromName, toDirectory, toName)
+	}
+	return fromDirectory.Link(fromName, toDirectory, toName)
 }
 
 func (ff *hardlinkingFileFetcher) makeSpace(size int64) error {
@@ -76,7 +94,7 @@ func (ff *hardlinkingFileFetcher) GetFile(ctx context.Context, blobDigest digest
 	}
 
 	for {
-		// If the file is present in the cache, hardlink it to the destination.
+		// If the file is present in the cache, stage it to the destination.
 		if err := ff.tryLinkFromCache(key, directory, name); err == nil {
 			return nil
 		} else if !os.IsNotExist(err) {
@@ -137,8 +155,8 @@ func (ff *hardlinkingFileFetcher) GetFile(ctx context.Context, blobDigest digest
 			return err
 		}
 
-		// Hardlink the file into the cache.
-		if err := directory.Link(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
+		// Stage the file into the cache.
+		if err := ff.installFile(directory, name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
 			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to add cached file %#v", key)
 		}
 		ff.evictionSet.Insert(key)
@@ -147,17 +165,17 @@ func (ff *hardlinkingFileFetcher) GetFile(ctx context.Context, blobDigest digest
 	} else {
 		// Even though the file is part of our bookkeeping, we
 		// observed it didn't exist. Repair this inconsistency.
-		if err := directory.Link(name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
+		if err := ff.installFile(directory, name, ff.cacheDirectory, path.MustNewComponent(key)); err != nil && !os.IsExist(err) {
 			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to repair cached file %#v", key)
 		}
 	}
 	return nil
 }
 
-// tryLinkFromCache attempts to create a hardlink from the cache to a
-// file in the build directory. It returns os.ErrNotExist if the file
-// is not in the cache bookkeeping, or if it was in bookkeeping but
-// missing on disk.
+// tryLinkFromCache attempts to stage a file from the cache into the
+// build directory (via link(2) or clonefile(2); see installFile). It
+// returns os.ErrNotExist if the file is not in the cache bookkeeping, or
+// if it was in bookkeeping but missing on disk.
 func (ff *hardlinkingFileFetcher) tryLinkFromCache(key string, directory filesystem.Directory, name path.Component) error {
 	ff.filesLock.RLock()
 	defer ff.filesLock.RUnlock()
@@ -167,11 +185,11 @@ func (ff *hardlinkingFileFetcher) tryLinkFromCache(key string, directory filesys
 		ff.evictionSet.Touch(key)
 		ff.evictionLock.Unlock()
 
-		if err := ff.cacheDirectory.Link(path.MustNewComponent(key), directory, name); err == nil {
-			// Successfully hardlinked the file to its destination.
+		if err := ff.installFile(ff.cacheDirectory, path.MustNewComponent(key), directory, name); err == nil {
+			// Successfully staged the file to its destination.
 			return nil
 		} else if !os.IsNotExist(err) {
-			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to create hardlink to cached file %#v", key)
+			return util.StatusWrapfWithCode(err, codes.Internal, "Failed to stage cached file %#v", key)
 		}
 	}
 	return os.ErrNotExist

@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync/atomic"
@@ -47,6 +48,40 @@ import (
 
 	"go.opentelemetry.io/otel"
 )
+
+// validateClonefileUsable fails fast when use_clonefile is enabled but the
+// worker cannot actually clonefile(2) inputs from the cache directory into
+// the build directory. Without this check a misconfigured worker — a
+// non-Darwin host (Clonefile returns Unimplemented) or a build/cache
+// directory pair not on the same APFS volume (EXDEV/ENOTSUP) — boots
+// healthy and then fails every action at input-staging time. It probes the
+// exact operation the fetcher performs by cloning a temporary file from the
+// cache directory into the build directory.
+func validateClonefileUsable(buildDirectory, cacheDirectory filesystem.Directory) error {
+	if runtime.GOOS != "darwin" {
+		return status.Error(codes.InvalidArgument, "use_clonefile is only supported on Darwin")
+	}
+	probeName := path.MustNewComponent(".bb_worker_clonefile_probe")
+	// Remove any probe file stranded in the build directory by a previous
+	// start. The cache directory was already emptied by RemoveAllChildren.
+	_ = buildDirectory.Remove(probeName)
+	f, err := cacheDirectory.OpenWrite(probeName, filesystem.CreateExcl(0o644))
+	if err != nil {
+		return util.StatusWrap(err, "Failed to create clonefile probe in cache directory")
+	}
+	if err := f.Close(); err != nil {
+		_ = cacheDirectory.Remove(probeName)
+		return util.StatusWrap(err, "Failed to close clonefile probe in cache directory")
+	}
+	defer func() { _ = cacheDirectory.Remove(probeName) }()
+	if err := cacheDirectory.Clonefile(probeName, buildDirectory, probeName); err != nil {
+		return util.StatusWrapWithCode(err, codes.InvalidArgument, "clonefile probe from cache to build directory failed; check that build_directory_path and cache_directory_path are on the same APFS volume and that no stale probe file exists")
+	}
+	// The clone succeeding is the capability being validated; removing the
+	// cloned probe is best-effort and must not gate worker startup.
+	_ = buildDirectory.Remove(probeName)
+	return nil
+}
 
 func main() {
 	program.RunMain(func(ctx context.Context, siblingsGroup, dependenciesGroup program.Group) error {
@@ -301,11 +336,17 @@ func main() {
 				if err != nil {
 					return util.StatusWrap(err, "Failed to create eviction set for cache directory")
 				}
+				if nativeConfiguration.UseClonefile {
+					if err := validateClonefileUsable(naiveBuildDirectory, cacheDirectory); err != nil {
+						return util.StatusWrap(err, "use_clonefile is enabled but not usable")
+					}
+				}
 				fileFetcher = cas.NewHardlinkingFileFetcher(
 					cas.NewBlobAccessFileFetcher(globalContentAddressableStorage),
 					cacheDirectory,
 					int(nativeConfiguration.MaximumCacheFileCount),
 					nativeConfiguration.MaximumCacheSizeBytes,
+					nativeConfiguration.UseClonefile,
 					eviction.NewMetricsSet(evictionSet, "HardlinkingFileFetcher"))
 
 				// Using a native file system requires us to

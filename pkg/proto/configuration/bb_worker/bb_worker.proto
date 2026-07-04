@@ -232,6 +232,34 @@ message NativeBuildDirectoryConfiguration {
   // LEAST_RECENTLY_USED can, assuming the cache size is sufficient.
   buildbarn.configuration.eviction.CacheReplacementPolicy
       cache_replacement_policy = 5;
+
+  // Use clonefile(2) (APFS copy-on-write) instead of link(2) to stage
+  // cached input files into the build directory. Only enable this on
+  // Darwin when both build_directory_path and cache_directory_path live
+  // on the same APFS volume. The worker validates this at startup by
+  // probing an actual clone between the two directories and refuses to
+  // start (InvalidArgument) if clonefile is unavailable (non-Darwin,
+  // cross-volume, or non-APFS), rather than failing every action later.
+  //
+  // Motivation: hardlinks share an inode with the cache entry, so on
+  // macOS a self-resolving executable (e.g. a hermetic Python
+  // interpreter) resolves its own path to the cache-directory name
+  // rather than its input-root path, and then cannot locate libpython or
+  // its stdlib ("Library not loaded: @rpath/libpython..." /
+  // "Failed to import encodings module"). clonefile(2) gives each staged
+  // file its own path while still sharing storage copy-on-write, fixing
+  // the resolution without giving up the cache's deduplication benefit.
+  //
+  // Trade-off: unlike link(2), each clone gets a DISTINCT inode, so
+  // content-identical files staged at multiple input-root paths no longer
+  // share an inode. Clang keys '#pragma once' on (device, inode) — the
+  // same property the cache_replacement_policy note above relies on — so
+  // enabling this can defeat '#pragma once' for a header that appears at
+  // two identical-content paths within one input root, causing
+  // double-inclusion (redefinition errors). Validate the actual Apple /
+  // clang / Swift build set under this option before enabling it
+  // fleet-wide.
+  bool use_clonefile = 6;
 }
 
 message VirtualBuildDirectoryConfiguration {
