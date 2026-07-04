@@ -26,7 +26,7 @@ func TestHardlinkingFileFetcher(t *testing.T) {
 
 	baseFileFetcher := mock.NewMockFileFetcher(ctrl)
 	cacheDirectory := mock.NewMockDirectory(ctrl)
-	fileFetcher := cas.NewHardlinkingFileFetcher(baseFileFetcher, cacheDirectory, 1, 1024, eviction.NewLRUSet[string]())
+	fileFetcher := cas.NewHardlinkingFileFetcher(baseFileFetcher, cacheDirectory, 1, 1024, false, eviction.NewLRUSet[string]())
 
 	blobDigest1 := digest.MustNewDigest("example", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
 	buildDirectory := mock.NewMockDirectory(ctrl)
@@ -68,7 +68,7 @@ func TestHardlinkingFileFetcher(t *testing.T) {
 		Return(syscall.EIO)
 	testutil.RequireEqualStatus(
 		t,
-		status.Error(codes.Internal, "Failed to create hardlink to cached file \"3-8b1a9953c4611296a827abf8c47804d7-5-x\": input/output error"),
+		status.Error(codes.Internal, "Failed to stage cached file \"3-8b1a9953c4611296a827abf8c47804d7-5-x\": input/output error"),
 		fileFetcher.GetFile(ctx, blobDigest1, buildDirectory, path.MustNewComponent("hello.txt"), false))
 
 	// Recover from the case where the cache directory gets cleaned
@@ -132,4 +132,33 @@ func TestHardlinkingFileFetcher(t *testing.T) {
 	require.NoError(
 		t,
 		fileFetcher.GetFile(ctx, blobDigest2, buildDirectory, path.MustNewComponent("goodbye.txt"), false))
+}
+
+func TestHardlinkingFileFetcherClonefile(t *testing.T) {
+	ctrl, ctx := gomock.WithContext(context.Background(), t)
+
+	baseFileFetcher := mock.NewMockFileFetcher(ctrl)
+	cacheDirectory := mock.NewMockDirectory(ctrl)
+	// With useClonefile enabled, staging must go through Clonefile(2),
+	// not Link(2), so that self-resolving executables (e.g. a hermetic
+	// Python interpreter) observe their input-root path instead of the
+	// shared cache-directory inode.
+	fileFetcher := cas.NewHardlinkingFileFetcher(baseFileFetcher, cacheDirectory, 1, 1024, true, eviction.NewLRUSet[string]())
+
+	blobDigest := digest.MustNewDigest("example", remoteexecution.DigestFunction_MD5, "8b1a9953c4611296a827abf8c47804d7", 5)
+	buildDirectory := mock.NewMockDirectory(ctrl)
+	key := path.MustNewComponent("3-8b1a9953c4611296a827abf8c47804d7-5-x")
+
+	// First fetch: download the file, then clone it into the cache.
+	baseFileFetcher.EXPECT().GetFile(ctx, blobDigest, buildDirectory, path.MustNewComponent("hello.txt"), false)
+	buildDirectory.EXPECT().Clonefile(path.MustNewComponent("hello.txt"), cacheDirectory, key)
+	require.NoError(
+		t,
+		fileFetcher.GetFile(ctx, blobDigest, buildDirectory, path.MustNewComponent("hello.txt"), false))
+
+	// Subsequent fetch: clone from the cache back into the build directory.
+	cacheDirectory.EXPECT().Clonefile(key, buildDirectory, path.MustNewComponent("hello.txt"))
+	require.NoError(
+		t,
+		fileFetcher.GetFile(ctx, blobDigest, buildDirectory, path.MustNewComponent("hello.txt"), false))
 }

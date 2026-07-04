@@ -7,8 +7,8 @@ import (
 	"github.com/buildbarn/bb-remote-execution/pkg/filesystem/access"
 	"github.com/buildbarn/bb-remote-execution/pkg/filesystem/pool"
 	"github.com/buildbarn/bb-remote-execution/pkg/proto/remoteworker"
-	auth_pb "github.com/buildbarn/bb-storage/pkg/proto/auth"
 	"github.com/buildbarn/bb-storage/pkg/digest"
+	auth_pb "github.com/buildbarn/bb-storage/pkg/proto/auth"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
